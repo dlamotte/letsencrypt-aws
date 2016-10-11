@@ -1,4 +1,5 @@
 import datetime
+import errno
 import json
 import os
 import sys
@@ -24,6 +25,8 @@ import rfc3986
 
 DEFAULT_ACME_DIRECTORY_URL = "https://acme-v01.api.letsencrypt.org/directory"
 CERTIFICATE_EXPIRATION_THRESHOLD = datetime.timedelta(days=45)
+LETSENCRYPT_AWS_CONFIG_FILE = \
+    os.environ.get('LETSENCRYPT_AWS_CONFIG_FILE', 'config.json')
 # One day
 PERSISTENT_SLEEP_INTERVAL = 60 * 60 * 24
 DNS_TTL = 30
@@ -43,6 +46,46 @@ class Logger(object):
             formatted_data
         ))
 
+class Config(object):
+    def __init__(self, logger, default=None):
+        self._config = None
+        if default is not None:
+            self._config = default
+        self.logger = logger
+        self.read()
+
+    def __getattr__(self, name):
+        return getattr(self._config, name)
+
+    def __getitem__(self, name):
+        return self._config[name]
+
+    def read(self):
+        # environment variables wont change from under us, dont bother
+        # "re-reading" it if we read it once
+        if self._config is None and 'LETSENCRYPT_AWS_CONFIG' in os.environ:
+            self._config = json.loads(os.environ['LETSENCRYPT_AWS_CONFIG'])
+            self.logger.emit("config.read-env")
+            return
+
+        # read the config file everytime
+        try:
+            with open(LETSENCRYPT_AWS_CONFIG_FILE) as fp:
+                self._config = json.loads(fp.read())
+                self.logger.emit(
+                    "config.read-file",
+                    config=LETSENCRYPT_AWS_CONFIG_FILE,
+                    mtime=os.fstat(fp.fileno()).st_mtime
+                )
+                return
+        except IOError as exc:
+            if exc.errno != errno.ENOENT:
+                raise
+
+            self.logger.emit("config.read-none")
+
+        if self._config is None:
+            raise Exception('error: no configuration specified')
 
 def _get_iam_certificate(iam_client, certificate_id):
     paginator = iam_client.get_paginator("list_server_certificates")
@@ -494,51 +537,52 @@ def update_certificates(persistent=False, force_issue=False):
     route53_client = session.client("route53")
     iam_client = session.client("iam")
 
-    config = json.loads(os.environ["LETSENCRYPT_AWS_CONFIG"])
-    domains = config["domains"]
-    acme_directory_url = config.get(
-        "acme_directory_url", DEFAULT_ACME_DIRECTORY_URL
-    )
-    acme_account_key = config["acme_account_key"]
-    acme_client = setup_acme_client(
-        s3_client, acme_directory_url, acme_account_key
-    )
+    config = Config(logger)
+    while True:
+        logger.emit("running",
+            mode="persistent" if persistent else "single"
+        )
 
-    certificate_requests = []
-    for domain in domains:
-        if "elb" in domain:
-            cert_location = ELBCertificate(
-                elb_client, iam_client,
-                domain["elb"]["name"], int(domain["elb"].get("port", 443))
-            )
-        else:
-            raise ValueError(
-                "Unknown certificate location: {!r}".format(domain)
-            )
+        domains = config["domains"]
+        acme_directory_url = config.get(
+            "acme_directory_url", DEFAULT_ACME_DIRECTORY_URL
+        )
+        acme_account_key = config["acme_account_key"]
+        acme_client = setup_acme_client(
+            s3_client, acme_directory_url, acme_account_key
+        )
 
-        certificate_requests.append(CertificateRequest(
-            cert_location,
-            Route53ChallengeCompleter(route53_client),
-            domain["hosts"],
-            domain.get("key_type", "rsa"),
-        ))
+        certificate_requests = []
+        for domain in domains:
+            if "elb" in domain:
+                cert_location = ELBCertificate(
+                    elb_client, iam_client,
+                    domain["elb"]["name"], int(domain["elb"].get("port", 443))
+                )
+            else:
+                raise ValueError(
+                    "Unknown certificate location: {!r}".format(domain)
+                )
 
-    if persistent:
-        logger.emit("running", mode="persistent")
-        while True:
-            update_certs(
-                logger, acme_client,
-                force_issue, certificate_requests
-            )
-            # Sleep before we check again
-            logger.emit("sleeping", duration=PERSISTENT_SLEEP_INTERVAL)
-            time.sleep(PERSISTENT_SLEEP_INTERVAL)
-    else:
-        logger.emit("running", mode="single")
+            certificate_requests.append(CertificateRequest(
+                cert_location,
+                Route53ChallengeCompleter(route53_client),
+                domain["hosts"],
+                domain.get("key_type", "rsa"),
+            ))
+
         update_certs(
             logger, acme_client,
             force_issue, certificate_requests
         )
+
+        if persistent:
+            # Sleep before we check again
+            logger.emit("sleeping", duration=PERSISTENT_SLEEP_INTERVAL)
+            time.sleep(PERSISTENT_SLEEP_INTERVAL)
+            config.read()
+        else:
+            break
 
 
 @cli.command()
@@ -551,7 +595,7 @@ def update_certificates(persistent=False, force_issue=False):
 )
 def register(email, out):
     logger = Logger()
-    config = json.loads(os.environ.get("LETSENCRYPT_AWS_CONFIG", "{}"))
+    config = Config(logger, default={})
     acme_directory_url = config.get(
         "acme_directory_url", DEFAULT_ACME_DIRECTORY_URL
     )

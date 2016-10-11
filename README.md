@@ -47,7 +47,9 @@ use IAM instance profiles (which are supported, but not mentioned by the
 `boto3` documentation). See below for which AWS permissions are required.
 
 `letsencrypt-aws` takes it's configuration via the `LETSENCRYPT_AWS_CONFIG`
-environment variable. This should be a JSON object with the following schema:
+environment variable directly or via a file pointed to by the environment
+variable `LETSENCRYPT_AWS_CONFIG_FILE`. This should be a JSON object with the
+following schema:
 
 ```json
 {
