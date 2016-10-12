@@ -64,7 +64,11 @@ following schema:
         }
     ],
     "acme_account_key": "location of the account private key (string)",
-    "acme_directory_url": "optional, defaults to Let's Encrypt production (string)"
+    "acme_directory_url": "optional, defaults to Let's Encrypt production (string)",
+    "nameservers": [
+        "optional",
+        "useful in some circumstances (ie: overlapping aws public/private zones)"
+    ]
 }
 ```
 

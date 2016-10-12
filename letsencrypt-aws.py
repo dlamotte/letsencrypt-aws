@@ -2,6 +2,7 @@ import datetime
 import errno
 import json
 import os
+import re
 import sys
 import time
 
@@ -17,6 +18,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
 
 import boto3
+import dns.resolver
 
 import OpenSSL.crypto
 
@@ -47,6 +49,9 @@ class Logger(object):
         ))
 
 class Config(object):
+    def __contains__(self, name):
+        return name in self._config
+
     def __init__(self, logger, default=None):
         self._config = None
         if default is not None:
@@ -359,6 +364,16 @@ def complete_dns_challenge(logger, acme_client, dns_challenge_completer,
     )
     acme_client.answer_challenge(authz_record.dns_challenge, response)
 
+def dns_resolve_a(name):
+    # ipv4 or ipv6... very inaccurate...
+    if re.match(r'^\d+\.\d+\.\d+\.\d+$', name) or ':' in name:
+        return name
+
+    resolver = dns.resolver.get_default_resolver()
+    answer = resolver.query(name, 'A')
+
+    # yikes
+    return answer.response.answer[0].items[0].address
 
 def request_certificate(logger, acme_client, elb_name, authorizations, csr):
     logger.emit("updating-elb.request-cert", elb_name=elb_name)
@@ -538,10 +553,25 @@ def update_certificates(persistent=False, force_issue=False):
     iam_client = session.client("iam")
 
     config = Config(logger)
+    default_nameservers = None
     while True:
         logger.emit("running",
             mode="persistent" if persistent else "single"
         )
+
+        resolver = dns.resolver.get_default_resolver()
+        # handle case if config's nameservers change (removed or changed)
+        if default_nameservers is None:
+            default_nameservers = resolver.nameservers
+        else:
+            resolver.nameservers = default_nameservers
+
+        if 'nameservers' in config:
+            resolver.nameservers = map(dns_resolve_a, config["nameservers"])
+            logger.emit("config.nameservers",
+                ns=config["nameservers"],
+                ip=resolver.nameservers
+            )
 
         domains = config["domains"]
         acme_directory_url = config.get(
