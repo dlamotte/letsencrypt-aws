@@ -53,6 +53,31 @@ following schema:
 
 ```json
 {
+    "certificates": [
+        {
+            "elbs": [
+                {
+                    "name": "ELB name (string)",
+                    "port": "optional, defaults to 443 (integer)"
+                }
+            ],
+            "hosts": ["list of hosts you want on the certificate (strings)"],
+            "key_type": "rsa or ecdsa, optional, defaults to rsa (string)"
+        }
+    ],
+    "acme_account_key": "location of the account private key (string)",
+    "acme_directory_url": "optional, defaults to Let's Encrypt production (string)",
+    "nameservers": [
+        "optional",
+        "useful in some circumstances (ie: overlapping aws public/private zones)"
+    ]
+}
+```
+
+Deprecated schema (will issue a warning):
+
+```
+{
     "domains": [
         {
             "elb": {
