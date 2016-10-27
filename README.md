@@ -61,6 +61,14 @@ following schema:
                     "port": "optional, defaults to 443 (integer)"
                 }
             ],
+            "k8s_secrets": [
+                {
+                    "namespace": "default",
+                    "name": "secret name",
+                    "secret_cert": "cert.pem",
+                    "secret_key": "key.pem"
+                }
+            ],
             "hosts": ["list of hosts you want on the certificate (strings)"],
             "key_type": "rsa or ecdsa, optional, defaults to rsa (string)"
         }

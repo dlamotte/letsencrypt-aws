@@ -1,3 +1,4 @@
+import base64
 import datetime
 import errno
 import json
@@ -19,6 +20,7 @@ from cryptography.hazmat.primitives.asymmetric import ec, rsa
 
 import boto3
 import dns.resolver
+import pykube
 
 import OpenSSL.crypto
 
@@ -147,6 +149,10 @@ class ELBCertificate(object):
             self.iam_client, elb_listener["SSLCertificateId"]
         )
 
+    @property
+    def name_display(self):
+        return self.elb_name
+
     def update_certificate(self, logger, hosts, private_key, pem_certificate,
                            pem_certificate_chain):
         logger.emit(
@@ -187,6 +193,54 @@ class ELBCertificate(object):
             LoadBalancerPort=self.elb_port,
         )
 
+class KubernetesSecretCertificate(object):
+    def __init__(self, kube, namespace, name, secret_cert, secret_key):
+        self.kube = kube
+        self.namespace = namespace
+        self.name = name
+        self.secret_cert = secret_cert
+        self.secret_key = secret_key
+
+    def get_secret(self):
+        return pykube.Secret.objects(self.kube) \
+            .filter(namespace=self.namespace) \
+            .get(name=self.name)
+
+    def get_current_certificate(self):
+        secret = self.get_secret()
+
+        return x509.load_pem_x509_certificate(
+            base64.b64decode(
+                secret.obj['data'][self.secret_cert]
+            ).encode('utf8'),
+            default_backend()
+        )
+
+    @property
+    def name_display(self):
+        return '{}.{}'.format(self.namespace, self.name)
+
+    def update_certificate(self, logger, hosts, private_key, pem_certificate,
+                           pem_certificate_chain):
+        logger.emit(
+            "updating-cert.kube-secret",
+            namespace=self.namespace,
+            name=self.name,
+        )
+
+        secret = self.get_secret()
+        secret.obj['data'][self.secret_cert] = \
+            base64.b64encode(pem_certificate + pem_certificate_chain)
+        secret.obj['data'][self.secret_key] = base64.b64encode(
+            private_key.private_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PrivateFormat.TraditionalOpenSSL,
+                encryption_algorithm=serialization.NoEncryption(),
+            )
+        )
+        secret.update()
+
+        return
 
 class Route53ChallengeCompleter(object):
     def __init__(self, route53_client):
@@ -393,8 +447,8 @@ def request_certificate(logger, acme_client, authorizations, csr):
 
 
 def update_cert(logger, acme_client, force_issue, cert_request):
-    logger.emit("updating-cert", elb_names=[
-        cert_location.elb_name
+    logger.emit("updating-cert", names=[
+        cert_location.name_display
         for cert_location in cert_request.cert_locations
     ])
 
@@ -480,7 +534,14 @@ def update_cert(logger, acme_client, force_issue, cert_request):
             private_key, pem_certificate, pem_certificate_chain
         )
         for cert_location in cert_request.cert_locations:
-            cert_location.update_elb_certificate(logger, new_cert_arn)
+            if isinstance(cert_location, ELBCertificate):
+                cert_location.update_elb_certificate(logger, new_cert_arn)
+
+            elif cert_location != cert_request.cert_locations[0]:
+                cert_location.update_certificate(
+                    logger, cert_request.hosts,
+                    private_key, pem_certificate, pem_certificate_chain
+                )
 
     finally:
         for authz_record in authorizations:
@@ -566,6 +627,7 @@ def update_certificates(persistent=False, force_issue=False):
     elb_client = session.client("elb")
     route53_client = session.client("route53")
     iam_client = session.client("iam")
+    kube = pykube.HTTPClient(pykube.KubeConfig.from_service_account())
 
     config = Config(logger)
     default_nameservers = None
@@ -611,7 +673,7 @@ def update_certificates(persistent=False, force_issue=False):
 
         certificate_requests = []
         for cert in certificates:
-            if not cert["elbs"]:
+            if not cert.get('elbs') and not cert.get('k8s_secrets'):
                 raise ValueError(
                     "Unknown certificate location: {!r}".format(cert)
                 )
@@ -621,7 +683,16 @@ def update_certificates(persistent=False, force_issue=False):
                     elb_client, iam_client,
                     elb["name"], int(elb.get("port", 443))
                 )
-                for elb in cert["elbs"]
+                for elb in cert.get('elbs', [])
+            ] + [
+                KubernetesSecretCertificate(
+                    kube,
+                    namespace=k8s_secret['namespace'],
+                    name=k8s_secret['name'],
+                    secret_cert=k8s_secret['secret_cert'],
+                    secret_key=k8s_secret['secret_key'],
+                )
+                for k8s_secret in cert.get('k8s_secrets', [])
             ]
 
             certificate_requests.append(CertificateRequest(
